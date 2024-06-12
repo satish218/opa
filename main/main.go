@@ -1,14 +1,11 @@
 package main
 
 import (
-	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strings"
-
-	"github.com/open-policy-agent/opa/rego"
 )
 
 type Input struct {
@@ -16,16 +13,15 @@ type Input struct {
 	Path   []string `json:"path"`
 }
 
+type OPARequest struct {
+	Input Input `json:"input"`
+}
+
+type OPAResponse struct {
+	Result bool `json:"result"`
+}
+
 func main() {
-	ctx := context.Background()
-
-	// Load the Rego policy from the file
-	policyFile := "policy.rego"
-	policy, err := os.ReadFile(policyFile)
-	if err != nil {
-		log.Fatalf("Failed to read policy file: %v", err)
-	}
-
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		// input data
 		input := Input{
@@ -33,28 +29,29 @@ func main() {
 			Path:   []string{strings.TrimPrefix(r.URL.Path, "/")},
 		}
 
-		// new OPA client with the loaded policy
-		client := rego.New(
-			rego.Query("data.example.allow"),
-			rego.Module(policyFile, string(policy)),
-		)
-
-		// query for evaluation
-		preparedQuery, err := client.PrepareForEval(ctx)
+		// create a request to OPA
+		opaReq := OPARequest{Input: input}
+		opaReqJson, err := json.Marshal(opaReq)
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to prepare policy for evaluation: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Failed to prepare OPA request: %v", err), http.StatusInternalServerError)
 			return
 		}
 
-		// evaluating the policy with the input data
-		rs, err := preparedQuery.Eval(ctx, rego.EvalInput(input))
+		resp, err := http.Post("http://localhost:8181/v1/data/example/allow", "application/json", strings.NewReader(string(opaReqJson)))
 		if err != nil {
-			http.Error(w, fmt.Sprintf("Failed to evaluate policy: %v", err), http.StatusInternalServerError)
+			http.Error(w, fmt.Sprintf("Failed to send request to OPA: %v", err), http.StatusInternalServerError)
+			return
+		}
+		defer resp.Body.Close()
+
+		var opaResp OPAResponse
+		if err := json.NewDecoder(resp.Body).Decode(&opaResp); err != nil {
+			http.Error(w, fmt.Sprintf("Failed to parse response from OPA: %v", err), http.StatusInternalServerError)
 			return
 		}
 
 		// checking the policy decision to respond accordingly
-		if len(rs) > 0 && rs[0].Expressions[0].Value.(bool) {
+		if opaResp.Result {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte("Access granted\n"))
 		} else {
